@@ -1,63 +1,53 @@
-boolean printDiagnostics = false;
+#define BLINKY_DIAG        0
+#define CUBE_DIAG          0
+#define COMM_LED_PIN       2
+#define RST_BUTTON_PIN     3
+#include <BlinkyPicoW.h>
+#include <SPI.h>
 
-union CubeData
+struct CubeSetting
 {
-  struct
-  {
-    int16_t state;
-    int16_t watchdog;
-    int16_t chipTemp;
-    int16_t switchOpenAlarm;
-    int16_t newData;
-    int16_t switchState[3];
-  };
-  byte buffer[16];
+  uint16_t publishInterval;
+  int16_t switchOpenAlarm;
 };
-CubeData cubeData;
+CubeSetting setting;
 
-#include "BlinkyPicoWCube.h"
+struct CubeReading
+{
+  int16_t switchState[3];
+};
+CubeReading reading;
 
-
-int commLEDPin = 2;
-int commLEDBright = 255; 
-int resetButtonPin = 3;
+unsigned long lastPublishTime;
 
 int powerPin[]  = {10, 13, 16};
 int switchPin[] = {11, 14, 17};
 int signalPin[] = {12, 15, 18};
 unsigned long switchTime[] = {0, 0, 0};
 
-unsigned long lastPublishTime;
-unsigned long publishInterval = 2000;
 unsigned long debounceInterval = 20;
+boolean forceArchiveData = false;
 
-void setupServerComm()
+void setupBlinky()
 {
-  // Optional setup to overide defaults
-  if (printDiagnostics)
-  {
-    Serial.begin(115200);
-    delay(10000);
-  }
-  BlinkyPicoWCube.setChattyCathy(printDiagnostics);
-  BlinkyPicoWCube.setWifiTimeoutMs(20000);
-  BlinkyPicoWCube.setWifiRetryMs(20000);
-  BlinkyPicoWCube.setMqttRetryMs(3000);
-  BlinkyPicoWCube.setResetTimeoutMs(10000);
-  BlinkyPicoWCube.setHdwrWatchdogMs(8000);
-  BlinkyPicoWCube.setBlMqttKeepAlive(8);
-  BlinkyPicoWCube.setBlMqttSocketTimeout(4);
-  BlinkyPicoWCube.setMqttLedFlashMs(10);
-  BlinkyPicoWCube.setWirelesBlinkMs(100);
-  BlinkyPicoWCube.setMaxNoMqttErrors(5);
-  
-  // Must be included
-  BlinkyPicoWCube.init(commLEDPin, commLEDBright, resetButtonPin);
+  if (BLINKY_DIAG > 0) Serial.begin(9600);
+
+  BlinkyPicoW.setMqttKeepAlive(15);
+  BlinkyPicoW.setMqttSocketTimeout(4);
+  BlinkyPicoW.setMqttPort(1883);
+  BlinkyPicoW.setMqttLedFlashMs(100);
+  BlinkyPicoW.setHdwrWatchdogMs(8000);
+
+  BlinkyPicoW.begin(BLINKY_DIAG, COMM_LED_PIN, RST_BUTTON_PIN, true, sizeof(setting), sizeof(reading));
 }
+
 
 void setupCube()
 {
-  lastPublishTime = 0;
+  if (CUBE_DIAG > 0) Serial.begin(9600);
+  setting.publishInterval = 2000;
+  lastPublishTime = millis();
+  
   for (int ii = 0; ii < 3; ++ii)
   {
     pinMode(powerPin[ii], OUTPUT);
@@ -65,83 +55,62 @@ void setupCube()
     pinMode(signalPin[ii], OUTPUT);
     digitalWrite(powerPin[ii], HIGH);
     digitalWrite(signalPin[ii], LOW);
-    cubeData.switchState[ii] = -1;
+    reading.switchState[ii] = -1;
   }
 
-  cubeData.state = 1;
-  cubeData.watchdog = 0;
-  cubeData.switchOpenAlarm = 1;
-  cubeData.newData = 0;
+  setting.switchOpenAlarm = 1;
+  forceArchiveData = false;
 }
 
-void cubeLoop()
+void loopCube()
 {
-  unsigned long nowTime = millis();
+  unsigned long now = millis();
   boolean stateChange = false;
   for (int ii = 0; ii < 3; ++ii)
   {
     int16_t pinValue = (int16_t) digitalRead(switchPin[ii]);
-    if (pinValue != cubeData.switchState[ii])
+    if (pinValue != reading.switchState[ii])
     {
-      if((nowTime - switchTime[ii]) > debounceInterval)
+      if((now - switchTime[ii]) > debounceInterval)
       {
-        cubeData.switchState[ii] = pinValue;
-        switchTime[ii] = nowTime;
+        reading.switchState[ii] = pinValue;
+        switchTime[ii] = now;
         stateChange = true;
         boolean signalVal = false;
         if (pinValue > 0) signalVal = true;
-        if (cubeData.switchOpenAlarm == 1) signalVal = !signalVal;
+        if (setting.switchOpenAlarm == 1) signalVal = !signalVal;
         digitalWrite(signalPin[ii], signalVal);
       }
     }
   }
-  cubeData.newData = 0;
+  forceArchiveData = false;
   if (stateChange)
   {
-    cubeData.newData = 1;
-    publishData(nowTime);  
+    forceArchiveData = true;
+    publishData(now);  
   }
-  if ((nowTime - lastPublishTime) > publishInterval) publishData(nowTime);
-  
+  if ((now - lastPublishTime) > setting.publishInterval)
+  {
+    publishData(now);
+  }
+  boolean newSettings = BlinkyPicoW.retrieveCubeSetting((uint8_t*) &setting);
+  if (newSettings)
+  {
+    if (setting.publishInterval < 1000) setting.publishInterval = 1000;
+  }
 }
 
-void publishData(unsigned long nowTime)
+void publishData(unsigned long now)
 {
-  lastPublishTime = nowTime;
-  cubeData.watchdog = cubeData.watchdog + 1;
-  if (cubeData.watchdog > 32760) cubeData.watchdog= 0 ;
-  cubeData.chipTemp = (int16_t) (analogReadTemp() * 100.0);
+  lastPublishTime = now;
   
-  BlinkyPicoWCube.publishToServer();
-  if (printDiagnostics)
+  boolean successful = BlinkyPicoW.publishCubeData((uint8_t*) &setting, (uint8_t*) &reading, forceArchiveData);
+  if (CUBE_DIAG > 0)
   {
-    Serial.print(cubeData.switchState[0]);
+    Serial.print(reading.switchState[0]);
     Serial.print(",");
-    Serial.print(cubeData.switchState[1]);
+    Serial.print(reading.switchState[1]);
     Serial.print(",");
-    Serial.println(cubeData.switchState[2]);
-  }
-}
-void handleNewSettingFromServer(uint8_t address)
-{
-  switch(address)
-  {
-    case 0:
-      break;
-    case 1:
-      break;
-    case 2:
-      break;
-    case 3:
-      for (int ii = 0; ii < 3; ++ii) 
-      {
-        cubeData.switchState[ii] = -1;
-        switchTime[ii] = 0;
-      }
-      break;
-    case 4:
-      break;
-    default:
-      break;
+    Serial.println(reading.switchState[2]);
   }
 }
