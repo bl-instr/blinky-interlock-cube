@@ -3,18 +3,19 @@
 #define COMM_LED_PIN       2
 #define RST_BUTTON_PIN     3
 #include <BlinkyPicoW.h>
-#include <SPI.h>
 
 struct CubeSetting
 {
   uint16_t publishInterval;
-  int16_t switchOpenAlarm;
+  uint16_t invert[3];
+  uint16_t termination[3];
+  uint16_t interlockOn[3];
 };
 CubeSetting setting;
 
 struct CubeReading
 {
-  int16_t switchState[3];
+  uint16_t switchState[3];
 };
 CubeReading reading;
 
@@ -22,7 +23,8 @@ unsigned long lastPublishTime;
 
 int powerPin[]  = {10, 13, 16};
 int switchPin[] = {11, 14, 17};
-int signalPin[] = {12, 15, 18};
+uint16_t oldTermination[] = {1, 1, 1};
+uint16_t oldInterlockOn[] = {1, 1, 1};
 unsigned long switchTime[] = {0, 0, 0};
 
 unsigned long debounceInterval = 20;
@@ -51,14 +53,15 @@ void setupCube()
   for (int ii = 0; ii < 3; ++ii)
   {
     pinMode(powerPin[ii], OUTPUT);
-    pinMode(switchPin[ii], INPUT);
-    pinMode(signalPin[ii], OUTPUT);
+    pinMode(switchPin[ii], INPUT_PULLDOWN);
     digitalWrite(powerPin[ii], HIGH);
-    digitalWrite(signalPin[ii], LOW);
     reading.switchState[ii] = -1;
+    setting.invert[ii] = 0;
+    setting.termination[ii] = 1;
+    oldTermination[ii] = 1;
+    oldInterlockOn[ii] = 1;
   }
 
-  setting.switchOpenAlarm = 1;
   forceArchiveData = false;
 }
 
@@ -68,7 +71,18 @@ void loopCube()
   boolean stateChange = false;
   for (int ii = 0; ii < 3; ++ii)
   {
-    int16_t pinValue = (int16_t) digitalRead(switchPin[ii]);
+    uint16_t pinValue = (uint16_t) digitalRead(switchPin[ii]);
+    if (setting.invert[ii] > 0)
+    {
+      if (pinValue > 0)
+      {
+        pinValue = 0;
+      }
+      else
+      {
+        pinValue = 1;
+      }
+    }
     if (pinValue != reading.switchState[ii])
     {
       if((now - switchTime[ii]) > debounceInterval)
@@ -76,10 +90,6 @@ void loopCube()
         reading.switchState[ii] = pinValue;
         switchTime[ii] = now;
         stateChange = true;
-        boolean signalVal = false;
-        if (pinValue > 0) signalVal = true;
-        if (setting.switchOpenAlarm == 1) signalVal = !signalVal;
-        digitalWrite(signalPin[ii], signalVal);
       }
     }
   }
@@ -97,6 +107,52 @@ void loopCube()
   if (newSettings)
   {
     if (setting.publishInterval < 1000) setting.publishInterval = 1000;
+    for (int ii = 0; ii < 3; ++ii)
+    {
+      if (setting.invert[ii] > 0)
+      {
+        setting.invert[ii] = 1;
+      }
+      else
+      {
+         setting.invert[ii] = 0;
+      }
+      if (setting.termination[ii] !=  oldTermination[ii])
+      {
+        PinMode mode =  INPUT;
+        switch (setting.termination[ii]) 
+        {
+          case 0:
+            mode =  INPUT;
+            break;
+          case 1:
+            mode =  INPUT_PULLDOWN;
+            break;
+          case 2:
+            mode =  INPUT_PULLUP;
+            break;
+          default:
+            mode =  INPUT;
+            break;
+        }
+        pinMode(switchPin[ii], mode);
+        oldTermination[ii] = setting.termination[ii];      
+      }
+      if (setting.interlockOn[ii] > 0)
+      {
+        setting.interlockOn[ii] = 1;
+      }
+      else
+      {
+         setting.interlockOn[ii] = 0;
+      }
+      if (setting.interlockOn[ii] !=  oldInterlockOn[ii])
+      {
+        if (setting.interlockOn[ii] == 0)  digitalWrite(powerPin[ii], LOW);
+        if (setting.interlockOn[ii] == 1)  digitalWrite(powerPin[ii], HIGH);
+        oldInterlockOn[ii] = setting.interlockOn[ii];      
+      }
+    }
   }
 }
 
